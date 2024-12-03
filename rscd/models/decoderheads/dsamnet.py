@@ -1,0 +1,49 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from MSAMNET.decoder import build_decoder
+from MSAMNET.utils import CBAM, DS_layer
+
+
+class DSAMNet(nn.Module):
+    def __init__(self, n_class=2,  ratio = 8, kernel = 7, f_c=64, freeze_bn=False):
+        super(DSAMNet, self).__init__()
+        BatchNorm = nn.BatchNorm2d
+
+
+        self.decoder = build_decoder(f_c, BatchNorm)
+
+        self.cbam0 = CBAM(f_c, ratio, kernel)
+        self.cbam1 = CBAM(f_c, ratio, kernel)
+
+        self.ds_lyr2 = DS_layer(64, 32, 2, 1, n_class)
+        self.ds_lyr3 = DS_layer(128, 32, 4, 3, n_class)
+
+        if freeze_bn:
+            self.freeze_bn()
+
+    def forward(self, input1):
+        featuresA, featuresB = input1
+        x_1, f2_1, f3_1, f4_1 = featuresA
+        x_2, f2_2, f3_2, f4_2 = featuresB
+
+
+        x1 = self.decoder(x_1, f2_1, f3_1, f4_1)
+        x2 = self.decoder(x_2, f2_2, f3_2, f4_2)
+
+        x1 = self.cbam0(x1). transpose(1,3) 
+        x2 = self.cbam1(x2). transpose(1,3)  # channel = 64
+
+        dist = F.pairwise_distance(x1, x2, keepdim=True). transpose(1,3)  # channel = 1
+        dist = F.interpolate(dist, size=input1.shape[2:], mode='bilinear', align_corners=True)
+
+        ds2 = self.ds_lyr2(torch.abs(f2_1 - f2_2))
+        ds3 = self.ds_lyr3(torch.abs(f3_1 - f3_2))
+
+        return dist, ds2, ds3
+
+
+    def freeze_bn(self):
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
